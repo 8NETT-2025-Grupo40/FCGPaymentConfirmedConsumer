@@ -5,7 +5,7 @@ using Amazon.Lambda.SQSEvents;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 
-namespace ExampleCS.Tests;
+namespace FCGPaymentConfirmedConsumer.Tests;
 
 public class GrantLambdaTests
 {

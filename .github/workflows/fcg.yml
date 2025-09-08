@@ -1,0 +1,83 @@
+name: Deploy Lambda (ZIP)
+
+on:
+  push:
+    branches: [ 'main' ]
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  LAMBDA_FUNCTION_NAME: teste
+  PROJECT_FUNCTION_PATH: FCGPaymentConfirmedConsumer/FCGPaymentConfirmedConsumer.csproj
+  PROJECT_TEST_PATH: test/FCGPaymentConfirmedConsumer.UnitTests/FCGPaymentConfirmedConsumer.UnitTests.csproj
+  DOTNET_VERSION: "8.0.x"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Evita que vários deploys na mesma ref (branch/tag) rodem ao mesmo tempo
+    concurrency:
+      group: lambda-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore $PROJECT_FUNCTION_PATH
+
+      - name: Build
+        run: |
+          dotnet build $PROJECT_FUNCTION_PATH -c Release --no-restore
+
+      - name: Run tests
+        run: dotnet test $PROJECT_TEST_PATH --configuration Release
+
+      - name: Publish
+        #  gera pasta 'publish' com os binários da Lambda
+        run: |
+          dotnet publish $PROJECT_FUNCTION_PATH -c Release -o publish
+
+      - name: Zip package
+        run: |
+          cd publish
+          zip -r ../function.zip .
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Update code and publish new version
+        id: publish
+        # publish cria uma NOVA versão numerada (1, 2, 3, ...)
+        run: |
+          VERSION=$(aws lambda update-function-code \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --zip-file fileb://function.zip \
+            --publish \
+            --region "$AWS_REGION" \
+            --query 'Version' --output text)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT     
+
+      - name: Point alias "prod" to latest
+        # Tenta atualizar; se não existir, cria o alias 'prod'
+        run: |
+          VERSION="${{ steps.publish.outputs.version }}"
+          aws lambda update-alias --function-name "$LAMBDA_FUNCTION_NAME" --name prod --function-version "$VERSION" --region "$AWS_REGION" \
+          || aws lambda create-alias --function-name "$LAMBDA_FUNCTION_NAME" --name prod --function-version "$VERSION" --region "$AWS_REGION"
+

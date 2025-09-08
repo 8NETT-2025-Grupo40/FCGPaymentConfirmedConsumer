@@ -55,7 +55,7 @@ using Polly;
 // Serializer padrão da Lambda para (de)serialização de eventos
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
 
-namespace ExampleCS;
+namespace FCGPaymentConfirmedConsumer;
 
 /*
  * Representa o payload do evento de pagamento confirmado publicado no SQS pela Payment API.
@@ -142,9 +142,10 @@ public class Function
     // Política de retry (Polly)
     private readonly AsyncPolicy<HttpResponseMessage> _retryPolicy;
 
-    /// <summary>Construtor padrão usado pela AWS.</summary>
-    public Function()
-        : this(new HttpClient(), LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Function>()) { }
+    /// <summary>
+    /// Construtor padrão usado pela AWS.
+    /// </summary>
+    public Function() : this(new HttpClient(), LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Function>()) { }
 
     /// <summary>Construtor para injeção de dependências em testes.</summary>
     public Function(HttpClient http, ILogger<Function> logger)
@@ -152,7 +153,7 @@ public class Function
         this._http = http;
         this._logger = logger;
 
-        // ---- Leitura de configuração via ENV (falha rápido se faltar o essencial) ----
+        // Leitura de configuração via ENV
         this._gameApiBase = Env("GAME_API_BASE_URL", required: true)!;
         this._grantPath = Env("GAME_API_GRANT_PATH") ?? "/internal/grants";
         this._apiKey = Env("GAME_API_KEY");
@@ -169,8 +170,8 @@ public class Function
         // Timeout de HttpClient (não confundir com timeout da Lambda)
         this._http.Timeout = TimeSpan.FromSeconds(int.TryParse(Env("HTTP_TIMEOUT_SECONDS"), out int s) && s > 0 ? s : 10);
 
-        // ---- Retry: backoff exponencial + jitter para 429/5xx/timeout ----
-        int retries = int.TryParse(Env("HTTP_RETRY_ATTEMPTS"), out int r) && r > 0 ? r : 3;
+        // Para o Retry, usa backoff exponencial + jitter para 429/5xx/timeout
+        int retries = int.TryParse(Env("HTTP_RETRY_ATTEMPTS"), out int r) && r > 0 ? r : 2;
         Random jitter = new();
 
         this._retryPolicy = Policy<HttpResponseMessage>
@@ -284,7 +285,7 @@ public class Function
             // exemplo: X-Correlation-Id
             req.Headers.TryAddWithoutValidation(this._corrHeader, correlationId);
 
-            // Autorização serviço->serviço (se configurada)
+            // Autorização serviço->serviço
             if (!string.IsNullOrWhiteSpace(this._apiKey))
             {
                 req.Headers.TryAddWithoutValidation("X-API-Key", this._apiKey);
