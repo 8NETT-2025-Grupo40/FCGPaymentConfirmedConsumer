@@ -1,26 +1,46 @@
 {
-    "Information": [
-        "This file provides default values for the deployment wizard inside Visual Studio and the AWS Lambda commands added to the .NET Core CLI.",
-        "To learn more about the Lambda commands with the .NET Core CLI execute the following command at the command line in the project root directory.",
-        "dotnet lambda help",
-        "All the command line options for the Lambda command can be specified in this file."
-    ],
-    "profile": "default",
-    "region": "us-east-1",
-    "configuration": "Release",
-    "function-architecture": "x86_64",
-    "function-runtime": "dotnet8",
-    "function-memory-size": 512,
-    "function-timeout": 15,
-    "function-handler": "FCGPaymentConfirmedConsumer::FCGPaymentConfirmedConsumer.Function::FunctionHandler",
-    "framework": "net8.0",
-    "function-name": "teste",
-    "function-description": "",
-    "package-type": "Zip",
-    "function-role": "arn:aws:iam::951042686167:role/service-role/teste-role-01kyfrx1",
-    "function-subnets": "",
-    "function-security-groups": "",
-    "tracing-mode": "PassThrough",
-    "environment-variables": "",
-    "image-tag": ""
+    "Configuration": {
+        "FunctionName": "FcgPaymentConfirmedConsumer",
+        "FunctionArn": "arn:aws:lambda:us-east-1:478511033947:function:FcgPaymentConfirmedConsumer",
+        "Runtime": "dotnet8",
+        "Role": "arn:aws:iam::478511033947:role/service-role/FcgPaymentConfirmedConsumer-role-2p283nxd",
+        "Handler": "FCGPaymentConfirmedConsumer::FCGPaymentConfirmedConsumer.Function::FunctionHandler",
+        "CodeSize": 648779,
+        "Description": "",
+        "Timeout": 15,
+        "MemorySize": 512,
+        "LastModified": "2025-09-26T23:48:17.000+0000",
+        "CodeSha256": "cdKCBeriFMnZMIur9DPu8ZW92gw+gNQ1oA40PUkgnec=",
+        "Version": "$LATEST",
+        "Environment": {
+            "Variables": {
+                "GAME_API_BASE_URL": "http://tmp-fcg-load-balancer-1549514023.us-east-1.elb.amazonaws.com",
+                "GAME_API_LIBRARY_PATH": "/games/library"
+            }
+        },
+        "TracingConfig": {
+            "Mode": "Active"
+        },
+        "RevisionId": "c4ee6947-5b8b-4f51-aa13-3c970a86ff00",
+        "State": "Active",
+        "LastUpdateStatus": "Successful",
+        "PackageType": "Zip",
+        "Architectures": [
+            "x86_64"
+        ],
+        "EphemeralStorage": {
+            "Size": 512
+        },
+        "SnapStart": {
+            "ApplyOn": "None",
+            "OptimizationStatus": "Off"
+        },
+        "RuntimeVersionConfig": {
+            "RuntimeVersionArn": "arn:aws:lambda:us-east-1::runtime:e1f13364d9d131d1175a2c6df999fcd43340019492a73ae9f769aa8fdf574d21"
+        },
+        "LoggingConfig": {
+            "LogFormat": "Text",
+            "LogGroup": "/aws/lambda/FcgPaymentConfirmedConsumer"
+        }
+    }
 }

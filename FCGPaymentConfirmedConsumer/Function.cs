@@ -5,19 +5,17 @@
 //  1) A Payment API publica no SQS um JSON com o evento "payment.confirmed" contendo userId, purchaseId e items.
 //  2) Esta Lambda é acionada pelo SQS (trigger). Para cada mensagem:
 //     2.1) Valida se o evento é "payment.confirmed". Outros eventos são ignorados.
-//     2.2) Monta um POST para a Game API (endpoint de grants), usando:
+//     2.2) Monta um POST para a Game API (endpoint de library), usando:
 //          - Idempotency-Key: <purchaseId>              -> para permitir retries seguros
-//          - X-Correlation-Id: <CorrelationId|purchaseId>  -> rastreabilidade ponta a ponta
 //          - X-API-Key: <opcional, serviço->serviço>    -> autenticação entre serviços
 //     2.3) Política de resiliência (Polly):
-//          - Retry com backoff exponencial + jitter em 429/5xx/timeout
-//          - 2xx e 409 (já concedido) contam como sucesso
-//          - 4xx (!= 409) é erro de contrato -> não-retryable -> descarta a mensagem (não entra em failures)
+//          - Retry com backoff exponencial + jitter em 5xx/timeout
+//          - 2xx contam como sucesso
+//          - 4xx é erro de contrato -> não-retryable -> descarta a mensagem (não entra em failures)
 //  3) Retornamos Partial Batch Response: apenas mensagens realmente "retryable" (exemplo: 5xx) entram em BatchItemFailures.
 // -----------------------------------------------------------------------------------------------------
 //  EXEMPLO DE MENSAGEM DO SQS (MessageBody):
 //  {
-//    "event": "payment.confirmed",
 //    "version": "1",
 //    "occurredAt": "2025-09-05T12:34:56Z",
 //    "userId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -27,20 +25,19 @@
 //      { "gameId": "G-456", "quantity": 2, "price": 19.90 }
 //    ]
 //  }
+//
+//  MessageAttribute["Type"] = "payment.confirmed"
 // -----------------------------------------------------------------------------------------------------
 //  VARIÁVEIS DE AMBIENTE (config da Lambda):
 //  - GAME_API_BASE_URL     (obrigatória)
-//  - GAME_API_GRANT_PATH   (opcional)     Default: /internal/grants
+//  - GAME_API_LIBRARY_PATH   (obrigatória)
 //  - GAME_API_KEY          (opcional)     Enviada no header X-API-Key
-//  - CORRELATION_HEADER    (opcional)     Default: X-Correlation-Id
 //  - HTTP_TIMEOUT_SECONDS  (opcional)     Default: 10
 //  - HTTP_RETRY_ATTEMPTS   (opcional)     Default: 3
 // -----------------------------------------------------------------------------------------------------
 //  NOTAS DIDÁTICAS
-//  - Idempotência: a Game API deve rejeitar duplicados (por exemplo, chave única por (UserId, GameId, PurchaseId)) e retornar 409 quando o grant já existe. Assim retries são seguros.
 //  - Partial Batch: importante para não reprocessar com erro aquilo que já foi bem-sucedido no mesmo lote.
 //  - Novo HttpRequest por tentativa: cada retry cria uma HttpRequestMessage nova (evita problemas de reuso de content).
-//  - Json camelCase: usamos JsonSerializerDefaults.Web para produzir "purchaseId", "userId", etc.
 // =====================================================================================================
 
 using System.Net;
@@ -49,6 +46,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.SQSEvents;
+using Amazon.XRay.Recorder.Handlers.System.Net;
 using Microsoft.Extensions.Logging;
 using Polly;
 
@@ -63,22 +61,34 @@ namespace FCGPaymentConfirmedConsumer;
  */
 public sealed class PaymentConfirmedEvent
 {
-    /// <summary>Tipo do evento. Esperado: "payment.confirmed".</summary>
+    /// <summary>
+    /// Tipo do evento. Esperado: "payment.confirmed"
+    /// </summary>
     [JsonPropertyName("event")] public string Event { get; set; } = "";
 
-    /// <summary>Versão do contrato do evento.</summary>
+    /// <summary>
+    /// Versão do contrato do evento
+    /// </summary>
     [JsonPropertyName("version")] public string Version { get; set; } = "1";
 
-    /// <summary>Momento em que o evento ocorreu (útil para auditoria).</summary>
+    /// <summary>
+    /// Momento em que o evento ocorreu
+    /// </summary>
     [JsonPropertyName("occurredAt")] public DateTimeOffset OccurredAt { get; set; }
 
-    /// <summary>Usuário que efetuou a compra.</summary>
+    /// <summary>
+    /// Usuário que efetuou a compra.
+    /// </summary>
     [JsonPropertyName("userId")] public string UserId { get; set; } = "";
 
-    /// <summary>Identificador da compra (também usado como idempotency-key).</summary>
+    /// <summary>
+    /// Identificador da compra (também usado como idempotency-key)
+    /// </summary>
     [JsonPropertyName("purchaseId")] public string PurchaseId { get; set; } = "";
 
-    /// <summary>Lista de itens/jogos adquiridos.</summary>
+    /// <summary>
+    /// Lista de itens/jogos adquiridos
+    /// </summary>
     [JsonPropertyName("items")] public List<PaymentItem> Items { get; set; } = new();
 }
 
@@ -86,43 +96,27 @@ public sealed class PaymentConfirmedEvent
 public sealed class PaymentItem
 {
     [JsonPropertyName("gameId")] public string GameId { get; set; } = "";
-    [JsonPropertyName("quantity")] public int Quantity { get; set; }
     [JsonPropertyName("price")] public decimal Price { get; set; }
 }
 
 /*
- * Requisição enviada à Game API para conceder todos os jogos de uma compra (grant "em lote").
- * Mantemos o mesmo shape camelCase; a Game API deve ser idempotente por purchaseId.
+ * Requisição enviada a Game API para conceder todos os jogos de uma compra
  */
 public sealed class GrantRequest
 {
     public string PurchaseId { get; set; } = "";
     public string UserId { get; set; } = "";
-    public List<GrantItem> Items { get; set; } = new();
+    public List<GrantItem> PurchasedGames { get; set; } = new();
 }
 
 /// <summary>Representa um jogo a ser concedido na Game API.</summary>
 public sealed class GrantItem
 {
     public string GameId { get; set; } = "";
-    public int Quantity { get; set; }
-    public decimal Price { get; set; }
 }
 
 #region Lambda Function
 
-/// <summary>
-/// Lambda que consome mensagens do SQS contendo <c>payment.confirmed</c>
-/// e chama a Game API para liberar os jogos ao usuário.
-/// </summary>
-/// <remarks>
-/// Regras principais:
-/// - Apenas eventos "payment.confirmed" são processados; demais são ignorados (não geram erro).
-/// - Idempotência: enviamos "Idempotency-Key = purchaseId" para a Game API.
-/// - Sucesso: 2xx e 409 (já concedido) contam como processado.
-/// - Retry: 429/5xx/timeout disparam retries com backoff exponencial + jitter (Polly).
-/// - Partial batch: apenas mensagens que realmente falharam (após retries) entram em BatchItemFailures.
-/// </remarks>
 public class Function
 {
     // Opções de Json para leitura (case-insensitive) e escrita (camelCase/Web).
@@ -133,19 +127,26 @@ public class Function
     private readonly HttpClient _http;
     private readonly ILogger<Function> _logger;
 
-    // Config externa (env vars)
-    private readonly string _gameApiBase; // BaseAddress do HttpClient
-    private readonly string _grantPath;   // Caminho relativo do endpoint (exemplo: "/internal/grants")
-    private readonly string? _apiKey;     // X-API-Key opcional
-    private readonly string _corrHeader;  // Nome do header de correlação (default: X-Correlation-Id)
+    // Config externa (variáveis de ambiente)
+    // BaseAddress do HttpClient
+    private readonly string _gameApiBase;
+    // Caminho relativo do endpoint (exemplo: "/games/library")
+    private readonly string _libraryPath;
+    // X-API-Key opcional
+    private readonly string? _apiKey;
+    // Nome do header de correlação (X-Correlation-Id)
+    private readonly string _corrHeader;
 
-    // Política de retry (Polly)
+    // Política de retry
     private readonly AsyncPolicy<HttpResponseMessage> _retryPolicy;
 
     /// <summary>
     /// Construtor padrão usado pela AWS.
     /// </summary>
-    public Function() : this(new HttpClient(), LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Function>()) { }
+    public Function() : this(
+        new HttpClient(new HttpClientXRayTracingHandler(new HttpClientHandler())),
+        LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Function>())
+    { }
 
     /// <summary>Construtor para injeção de dependências em testes.</summary>
     public Function(HttpClient http, ILogger<Function> logger)
@@ -155,9 +156,9 @@ public class Function
 
         // Leitura de configuração via ENV
         this._gameApiBase = Env("GAME_API_BASE_URL", required: true)!;
-        this._grantPath = Env("GAME_API_GRANT_PATH") ?? "/internal/grants";
+        this._libraryPath = Env("GAME_API_LIBRARY_PATH", required: true)!;
         this._apiKey = Env("GAME_API_KEY");
-        this._corrHeader = Env("CORRELATION_HEADER") ?? "X-Correlation-Id";
+        this._corrHeader = "X-Correlation-Id";
 
         // Garante BaseAddress com "/" no final para combinar com RequestUri relativa.
         if (!this._gameApiBase.EndsWith("/"))
@@ -170,7 +171,7 @@ public class Function
         // Timeout de HttpClient (não confundir com timeout da Lambda)
         this._http.Timeout = TimeSpan.FromSeconds(int.TryParse(Env("HTTP_TIMEOUT_SECONDS"), out int s) && s > 0 ? s : 10);
 
-        // Para o Retry, usa backoff exponencial + jitter para 429/5xx/timeout
+        // Para o Retry, usa backoff exponencial + jitter para 5xx/timeout
         int retries = int.TryParse(Env("HTTP_RETRY_ATTEMPTS"), out int r) && r > 0 ? r : 2;
         Random jitter = new();
 
@@ -232,14 +233,13 @@ public class Function
     private async Task<bool> ProcessRecordAsync(SQSEvent.SQSMessage msg)
     {
         // Checa se é um evento esperado (payment.confirmed); caso contrário, ignora silenciosamente.
-        using JsonDocument doc = JsonDocument.Parse(msg.Body);
-        if (!doc.RootElement.TryGetProperty("event", out JsonElement e))
+        if (!msg.MessageAttributes.TryGetValue("Type", out SQSEvent.MessageAttribute? attrType))
         {
-            this._logger.LogWarning("Sem 'event'. Ignorando. Body={Body}", msg.Body);
+            this._logger.LogWarning("Sem 'Type'. Ignorando. Body={Body}", msg.Body);
             return true;
         }
 
-        string? evt = e.GetString();
+        string? evt = attrType.StringValue;
         if (!string.Equals(evt, "payment.confirmed", StringComparison.OrdinalIgnoreCase))
         {
             this._logger.LogInformation("Evento ignorado: {Event}", evt);
@@ -249,30 +249,26 @@ public class Function
         // Desserializa o payload do evento (case-insensitive por segurança).
         PaymentConfirmedEvent data = JsonSerializer.Deserialize<PaymentConfirmedEvent>(msg.Body, JsonOpts) ?? throw new InvalidOperationException("Payload inválido (payment.confirmed).");
 
-        // Monta o corpo da requisição para a Game API (grant em lote).
+        // Monta o corpo da requisição para a Game API
         GrantRequest grant = new()
         {
             PurchaseId = data.PurchaseId,
             UserId = data.UserId,
-            Items = data.Items.Select(i => new GrantItem
+            PurchasedGames = data.Items.Select(i => new GrantItem
             {
                 GameId = i.GameId,
-                Quantity = i.Quantity,
-                Price = i.Price
             }).ToList()
         };
 
-        // Correlação: usa atributo do SQS se existir, senão cai para purchaseId.
-        string? correlationId = msg.MessageAttributes.TryGetValue("CorrelationId", out SQSEvent.MessageAttribute? attr) && !string.IsNullOrWhiteSpace(attr.StringValue)
-                ? attr.StringValue
-                : data.PurchaseId;
+        // Usa o purchaseId como CorrelationId
+        string correlationId = data.PurchaseId;
 
         // Envia a requisição sob política de retry (Polly).
         using HttpResponseMessage? resp = await this._retryPolicy.ExecuteAsync(ct =>
         {
             // Cria uma nova HttpRequestMessage a cada tentativa de retry.
             // IMPORTANTE: não reutilize HttpRequestMessage entre tentativas, pois o Content pode ser "consumido" e causar erros sutis
-            HttpRequestMessage req = new(HttpMethod.Post, this._grantPath)
+            HttpRequestMessage req = new(HttpMethod.Post, this._libraryPath)
             {
                 // Json camelCase (JsonSerializerDefaults.Web) para compatibilidade com a Game API
                 Content = JsonContent.Create(grant, options: JsonWriteOpts)
@@ -281,8 +277,7 @@ public class Function
             // garante safety em retries
             req.Headers.Add("Idempotency-Key", data.PurchaseId);
             // identificação do cliente
-            req.Headers.UserAgent.ParseAdd("grant-lambda/1.0");
-            // exemplo: X-Correlation-Id
+            req.Headers.UserAgent.ParseAdd("payment-lambda/1.0");
             req.Headers.TryAddWithoutValidation(this._corrHeader, correlationId);
 
             // Autorização serviço->serviço
@@ -297,18 +292,11 @@ public class Function
         // Mapeamento de respostas da Game API para a semântica do SQS:
         if ((int)resp.StatusCode is >= 200 and < 300)
         {
-            this._logger.LogInformation("Grant OK. purchaseId={PurchaseId}", data.PurchaseId);
-            return true; // sucesso
-        }
-
-        if (resp.StatusCode == HttpStatusCode.Conflict)
-        {
-            // Já concedido em chamada anterior -> idempotente -> sucesso.
-            this._logger.LogInformation("Grant idempotente (409). purchaseId={PurchaseId}", data.PurchaseId);
+            this._logger.LogInformation("OK. purchaseId={PurchaseId}", data.PurchaseId);
             return true;
         }
 
-        if (resp.StatusCode == HttpStatusCode.TooManyRequests || (int)resp.StatusCode >= 500)
+        if ((int)resp.StatusCode >= 500)
         {
             // Lança exceção para reprocessar a mensagem (entra em BatchItemFailures)
             string txt = await SafeReadAsync(resp);
